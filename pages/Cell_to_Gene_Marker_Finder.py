@@ -5,7 +5,7 @@ st.title("Cell-to-Gene Marker Finder")
 
 st.write("Find marker genes for a selected cell type by species.")
 
-MARKER_FILE = "/data/Cell_marker_All.xlsx"
+MARKER_FILE = "data/Cell_marker_All.xlsx"
 
 
 @st.cache_data
