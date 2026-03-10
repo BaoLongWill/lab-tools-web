@@ -8,10 +8,10 @@ st.write("Find possible signaling pathways between two human cell types using cu
 # -----------------------------
 # File paths
 # -----------------------------
-MARKER_FILE = "/Users/hotboytraidat/Desktop/project data/Cell_marker_All.xlsx"
-INTERACTION_FILE = "/Users/hotboytraidat/Desktop/project data/data raw/interaction_input.csv"
-GENE_FILE = "/Users/hotboytraidat/Desktop/project data/data raw/gene_input.csv"
-COMPLEX_FILE = "/Users/hotboytraidat/Desktop/project data/data raw/complex_input.csv"
+MARKER_FILE = "/data/Cell_marker_All.xlsx"
+INTERACTION_FILE = "/data/interaction_input.csv"
+GENE_FILE = "/data/gene_input.csv"
+COMPLEX_FILE = "/data/complex_input.csv"
 
 
 @st.cache_data
