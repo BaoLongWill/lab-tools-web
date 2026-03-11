@@ -1,8 +1,8 @@
 import streamlit as st
 
-st.set_page_config(page_title="SHY Lab Tools", layout="wide")
+st.set_page_config(page_title="Will Tools", layout="wide")
 
-st.title("Lab Tools Web")
+st.title("Will Lazy Tools")
 
 st.write("Collection of lightweight research tools for spatial biology and IHC experiments.")
 
