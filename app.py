@@ -1,6 +1,6 @@
 import streamlit as st
 
-st.set_page_config(page_title="Lab Tools", layout="wide")
+st.set_page_config(page_title="SHY Lab Tools", layout="wide")
 
 st.title("Lab Tools Web")
 
