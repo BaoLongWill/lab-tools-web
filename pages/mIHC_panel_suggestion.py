@@ -4,8 +4,10 @@ import streamlit as st
 
 CHANNELS = [480, 520, 540, 570, 620, 650, 690, 780]
 
-PREFERRED = [520, 570, 620, 690]
-INTERMEDIATE = [540, 650]
+# Brightness groups
+BRIGHT = [520, 650]
+MEDIUM = [540, 570, 620]
+DIM = [690]
 LATE = [780]
 
 LOCATION_OPTIONS = ["nucleus", "cytoplasm", "membrane"]
@@ -31,7 +33,7 @@ def pair_risk(c1, c2, same_location=False, weak=False, strong=False, morph_diff=
             3: 3,
             4: 2,
             5: 1,
-            6: 0
+            6: 0,
         }
         base = mapping.get(dist, 0)
 
@@ -43,6 +45,55 @@ def pair_risk(c1, c2, same_location=False, weak=False, strong=False, morph_diff=
         base -= 1
 
     return max(0, base)
+
+
+def brightness_penalty(marker_strength, channel):
+    """
+    Lower score = better match between marker intensity and Opal brightness.
+    Main idea:
+    - weak markers should prefer bright channels
+    - medium markers should prefer medium channels
+    - strong markers can tolerate dimmer channels better
+    - 780 is discouraged unless needed
+    - 480 is treated as a special segmentation slot, not a general preferred channel
+    """
+    if marker_strength == "weak":
+        if channel in BRIGHT:
+            return 0
+        if channel in MEDIUM:
+            return 3
+        if channel in DIM:
+            return 8
+        if channel == 780:
+            return 12
+        if channel == 480:
+            return 4
+
+    elif marker_strength == "medium":
+        if channel in MEDIUM:
+            return 0
+        if channel in BRIGHT:
+            return 1
+        if channel in DIM:
+            return 3
+        if channel == 780:
+            return 7
+        if channel == 480:
+            return 3
+
+    elif marker_strength == "strong":
+        if channel in DIM:
+            return 0
+        if channel in MEDIUM:
+            return 1
+        if channel in BRIGHT:
+            return 4
+        if channel == 780:
+            return 2
+        if channel == 480:
+            return 2
+
+    return 0
 
 
 def spacing_rule_ok(channels):
@@ -91,6 +142,11 @@ def norm_pair(a, b):
 def total_risk(df, assign, morph_pairs_set, checkpoint_pairs_set):
     score = 0
 
+    # 1) Brightness matching for each marker-channel assignment
+    for i in range(len(df)):
+        score += brightness_penalty(df.iloc[i]["strength"], assign[i])
+
+    # 2) Pairwise interaction / spectral-spacing logic
     for i in range(len(df)):
         for j in range(i + 1, len(df)):
             a = df.iloc[i]
@@ -104,6 +160,7 @@ def total_risk(df, assign, morph_pairs_set, checkpoint_pairs_set):
 
             score += pair_risk(assign[i], assign[j], same, weak, strong, morph_diff)
 
+    # 3) Checkpoint pairs should be further apart
     idx = {df.iloc[i]["marker"]: i for i in range(len(df))}
     for m1, m2 in checkpoint_pairs_set:
         if m1 in idx and m2 in idx:
@@ -133,14 +190,14 @@ for i in range(marker_count):
         location = st.selectbox(
             f"Location {i+1}",
             LOCATION_OPTIONS,
-            key=f"location_{i}"
+            key=f"location_{i}",
         )
 
     with col3:
         strength = st.selectbox(
             f"Strength {i+1}",
             STRENGTH_OPTIONS,
-            key=f"strength_{i}"
+            key=f"strength_{i}",
         )
 
     if marker_name.strip() == "":
@@ -149,7 +206,7 @@ for i in range(marker_count):
     markers.append({
         "marker": marker_name,
         "location": location,
-        "strength": strength
+        "strength": strength,
     })
 
 df = pd.DataFrame(markers)
@@ -165,7 +222,13 @@ if seg_yes == "Yes":
 fixed_yes = st.radio("Use fixed channels?", ["No", "Yes"], horizontal=True)
 fixed_map = {}
 if fixed_yes == "Yes":
-    fixed_n = st.number_input("Number of fixed markers", min_value=0, max_value=min(8, len(names)), value=0, step=1)
+    fixed_n = st.number_input(
+        "Number of fixed markers",
+        min_value=0,
+        max_value=min(8, len(names)),
+        value=0,
+        step=1,
+    )
     st.write("Define fixed marker-channel pairs")
     for i in range(fixed_n):
         c1, c2 = st.columns(2)
@@ -227,11 +290,12 @@ if st.button("Suggest panel"):
     else:
         n = len(work_df)
 
-        base = [c for c in PREFERRED if c not in reserved_channels]
-        mid = [c for c in INTERMEDIATE if c not in reserved_channels]
+        base = [c for c in BRIGHT if c not in reserved_channels]
+        mid = [c for c in MEDIUM if c not in reserved_channels]
+        dim = [c for c in DIM if c not in reserved_channels]
         late = [c for c in LATE if c not in reserved_channels]
 
-        pool = base + mid + late
+        pool = base + mid + dim + late
 
         if n == 0:
             result = pd.concat(reserved, ignore_index=True) if reserved else pd.DataFrame()
@@ -254,6 +318,10 @@ if st.button("Suggest panel"):
                     spread = spread_penalty(perm)
                     late_pen = late_channel_penalty(perm, n)
 
+                    # Priority order:
+                    # 1. Avoid 780 if possible
+                    # 2. Minimize overall risk (now includes brightness matching)
+                    # 3. Maximize spread
                     score_tuple = (late_pen, risk, spread)
 
                     if best_tuple is None or score_tuple < best_tuple:
