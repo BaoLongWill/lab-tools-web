@@ -4,7 +4,8 @@ st.set_page_config(page_title="Will Tools", layout="wide")
 
 st.title("Will Lazy Tools")
 
-st.write("Collection of lightweight research tools for spatial biology and IHC experiments.")
+st.write("LazyMe is a tiny toolbox for tired researchers doing spatial biology and IHC.
+It handles the boring parts of experiments — organizing images, planning mIHC panels, and other repetitive tasks — so you can focus on the fun part: discovering biology.")
 
 st.markdown("""
 ### Available tools
