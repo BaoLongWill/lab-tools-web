@@ -9,7 +9,7 @@ st.write("Collection of lightweight research tools for spatial biology and IHC e
 st.markdown("""
 ### Available tools
 
-- RenameIHC  
+- EzRename IHC  
 - mIHC panel suggestion  
 - Cell-to-Gene Marker Finder
 - CellTinder
