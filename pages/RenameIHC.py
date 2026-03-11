@@ -2,9 +2,9 @@ import os
 from datetime import datetime
 import streamlit as st
 
-st.title("RenameIHC")
+st.title("EzRename IHC")
 
-st.write("Upload IHC images and rename them using standardized metadata.")
+st.write("Upload IHC images and rename them using standardized format. Useful for a long day of experimenting, you might forget some details.")
 
 save_folder = os.path.expanduser("~/Desktop/RenameIHC_Output")
 os.makedirs(save_folder, exist_ok=True)
