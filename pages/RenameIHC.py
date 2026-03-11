@@ -39,7 +39,7 @@ if buffer == "Other":
 
 magnification = st.selectbox(
     "Magnification",
-    ["10X", "20X", "40X"]
+    ["4", "10X", "20X", "40X"]
 )
 
 user = st.text_input("User")
