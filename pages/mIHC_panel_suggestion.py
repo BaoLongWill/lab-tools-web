@@ -1,19 +1,38 @@
 import itertools
 import pandas as pd
-import streamlit as st
+import ipywidgets as widgets
+from IPython.display import display, clear_output
 
 CHANNELS = [480, 520, 540, 570, 620, 650, 690, 780]
 
-# Brightness groups
-BRIGHT = [520, 650]
-MEDIUM = [540, 570, 620]
-DIM = [690]
+PREFERRED = [520, 570, 620, 690]
+INTERMEDIATE = [540, 650]
 LATE = [780]
 
 LOCATION_OPTIONS = ["nucleus", "cytoplasm", "membrane"]
 STRENGTH_OPTIONS = ["weak", "medium", "strong"]
 
+marker_widgets = []
+checkpoint_pairs = []
+morph_pairs = []
+fixed_rows = []
 
+logic_state = {}
+
+title = widgets.HTML("<h3>mIHC Panel Planner</h3>")
+marker_count = widgets.BoundedIntText(value=4, min=1, max=8, description="Markers")
+generate_button = widgets.Button(description="Generate markers", button_style="info")
+logic_button = widgets.Button(description="Build logic", button_style="warning")
+suggest_button = widgets.Button(description="Suggest panel", button_style="success")
+
+form_out = widgets.Output()
+logic_out = widgets.Output()
+result_out = widgets.Output()
+
+
+# =========================
+# RISK
+# =========================
 def pair_risk(c1, c2, same_location=False, weak=False, strong=False, morph_diff=False):
     if c1 == c2:
         return 999
@@ -33,7 +52,7 @@ def pair_risk(c1, c2, same_location=False, weak=False, strong=False, morph_diff=
             3: 3,
             4: 2,
             5: 1,
-            6: 0,
+            6: 0
         }
         base = mapping.get(dist, 0)
 
@@ -47,56 +66,16 @@ def pair_risk(c1, c2, same_location=False, weak=False, strong=False, morph_diff=
     return max(0, base)
 
 
-def brightness_penalty(marker_strength, channel):
-    """
-    Lower score = better match between marker intensity and Opal brightness.
-    Main idea:
-    - weak markers should prefer bright channels
-    - medium markers should prefer medium channels
-    - strong markers can tolerate dimmer channels better
-    - 780 is discouraged unless needed
-    - 480 is treated as a special segmentation slot, not a general preferred channel
-    """
-    if marker_strength == "weak":
-        if channel in BRIGHT:
-            return 0
-        if channel in MEDIUM:
-            return 3
-        if channel in DIM:
-            return 8
-        if channel == 780:
-            return 12
-        if channel == 480:
-            return 4
-
-    elif marker_strength == "medium":
-        if channel in MEDIUM:
-            return 0
-        if channel in BRIGHT:
-            return 1
-        if channel in DIM:
-            return 3
-        if channel == 780:
-            return 7
-        if channel == 480:
-            return 3
-
-    elif marker_strength == "strong":
-        if channel in DIM:
-            return 0
-        if channel in MEDIUM:
-            return 1
-        if channel in BRIGHT:
-            return 4
-        if channel == 780:
-            return 2
-        if channel == 480:
-            return 2
-
-    return 0
-
-
 def spacing_rule_ok(channels):
+    """
+    Global spacing rule:
+    adjacent channels are not allowed anywhere in the panel.
+    Example:
+    520-540 -> invalid
+    540-570 -> invalid
+    570-620 -> invalid
+    540-620 -> valid
+    """
     ordered = sorted(channels, key=lambda x: CHANNELS.index(x))
 
     for i in range(len(ordered) - 1):
@@ -111,6 +90,9 @@ def spacing_rule_ok(channels):
 
 
 def spread_penalty(channels):
+    """
+    Prefer more spread-out panels.
+    """
     ordered = sorted(channels, key=lambda x: CHANNELS.index(x))
     penalty = 0
 
@@ -126,6 +108,9 @@ def spread_penalty(channels):
 
 
 def late_channel_penalty(channels, n_markers):
+    """
+    Discourage using 780 too early.
+    """
     penalty = 0
     if 780 in channels:
         if n_markers <= 5:
@@ -135,18 +120,111 @@ def late_channel_penalty(channels, n_markers):
     return penalty
 
 
+# =========================
+# DATA
+# =========================
+def collect_df():
+    rows = []
+    for i, w in enumerate(marker_widgets):
+        name = w["name"].value.strip()
+        if name == "":
+            name = f"Marker{i+1}"
+
+        rows.append({
+            "marker": name,
+            "location": w["location"].value,
+            "strength": w["strength"].value
+        })
+
+    return pd.DataFrame(rows)
+
+
 def norm_pair(a, b):
     return tuple(sorted([a, b]))
 
 
-def total_risk(df, assign, morph_pairs_set, checkpoint_pairs_set):
-    score = 0
+def morph_set():
+    s = set()
+    for a, b in morph_pairs:
+        if a.value and b.value and a.value != b.value:
+            s.add(norm_pair(a.value, b.value))
+    return s
 
-    # 1) Brightness matching for each marker-channel assignment
+
+def checkpoint_set():
+    s = set()
+    for a, b in checkpoint_pairs:
+        if a.value and b.value and a.value != b.value:
+            s.add(norm_pair(a.value, b.value))
+    return s
+
+
+# =========================
+# NEW HARD RULE FOR CHECKPOINT PAIRS
+# =========================
+def checkpoint_rule_ok(assign, df):
+    """
+    HARD CONSTRAINT:
+    checkpoint pairs must NOT be adjacent.
+    They must be at least distance >= 2 in CHANNELS.
+
+    Example:
+    540 with checkpoint partner must be 620+ or 520-
+    620 cannot be paired with 540 or 650 if they are checkpoint pairs
+    """
+    check = checkpoint_set()
+
     for i in range(len(df)):
-        score += brightness_penalty(df.iloc[i]["strength"], assign[i])
+        for j in range(i + 1, len(df)):
+            m1 = df.iloc[i]["marker"]
+            m2 = df.iloc[j]["marker"]
 
-    # 2) Pairwise interaction / spectral-spacing logic
+            if norm_pair(m1, m2) in check:
+                idx1 = CHANNELS.index(assign[i])
+                idx2 = CHANNELS.index(assign[j])
+
+                if abs(idx1 - idx2) < 2:
+                    return False
+
+    return True
+
+
+# =========================
+# SEGMENTATION
+# =========================
+def get_seg_marker():
+    if "seg_yes" in logic_state and logic_state["seg_yes"].value == "Yes":
+        m = logic_state["seg_text"].value.strip()
+        return m if m else None
+    return None
+
+
+# =========================
+# FIXED CHANNELS
+# =========================
+def get_fixed():
+    fixed_map = {}
+    if "fixed_yes" not in logic_state:
+        return fixed_map
+
+    if logic_state["fixed_yes"].value != "Yes":
+        return fixed_map
+
+    for m, c in fixed_rows:
+        if m.value:
+            fixed_map[m.value] = c.value
+
+    return fixed_map
+
+
+# =========================
+# TOTAL RISK
+# =========================
+def total_risk(df, assign):
+    score = 0
+    morph = morph_set()
+    check = checkpoint_set()
+
     for i in range(len(df)):
         for j in range(i + 1, len(df)):
             a = df.iloc[i]
@@ -156,202 +234,280 @@ def total_risk(df, assign, morph_pairs_set, checkpoint_pairs_set):
             weak = "weak" in [a["strength"], b["strength"]]
             strong = "strong" in [a["strength"], b["strength"]]
 
-            morph_diff = norm_pair(a["marker"], b["marker"]) in morph_pairs_set
+            morph_diff = norm_pair(a["marker"], b["marker"]) in morph
 
             score += pair_risk(assign[i], assign[j], same, weak, strong, morph_diff)
 
-    # 3) Checkpoint pairs should be further apart
-    idx = {df.iloc[i]["marker"]: i for i in range(len(df))}
-    for m1, m2 in checkpoint_pairs_set:
-        if m1 in idx and m2 in idx:
-            i = idx[m1]
-            j = idx[m2]
-            dist = abs(CHANNELS.index(assign[i]) - CHANNELS.index(assign[j]))
-            score += max(0, 4 - dist) * 2
+    # soft checkpoint penalty still kept
+    for i in range(len(df)):
+        for j in range(i + 1, len(df)):
+            a = df.iloc[i]["marker"]
+            b = df.iloc[j]["marker"]
+
+            if norm_pair(a, b) in check:
+                dist = abs(CHANNELS.index(assign[i]) - CHANNELS.index(assign[j]))
+                score += max(0, 4 - dist) * 2
 
     return score
 
 
-st.title("mIHC panel suggestion")
-st.write("Suggest Opal channel assignments for multiplex IHC panels.")
+# =========================
+# FORM
+# =========================
+def build_form(_):
+    global marker_widgets
+    marker_widgets = []
 
-marker_count = st.number_input("Number of markers", min_value=1, max_value=8, value=4, step=1)
+    with form_out:
+        clear_output()
 
-st.subheader("Marker information")
+        header = widgets.HBox([
+            widgets.HTML("<b style='width:160px'>Marker</b>"),
+            widgets.HTML("<b style='width:160px'>Location</b>"),
+            widgets.HTML("<b style='width:160px'>Strength</b>")
+        ])
 
-markers = []
-for i in range(marker_count):
-    col1, col2, col3 = st.columns(3)
+        rows = [header]
 
-    with col1:
-        marker_name = st.text_input(f"Marker {i+1} name", key=f"marker_name_{i}")
+        for i in range(marker_count.value):
+            name = widgets.Text(layout=widgets.Layout(width="160px"))
+            loc = widgets.Dropdown(options=LOCATION_OPTIONS, layout=widgets.Layout(width="160px"))
+            strength = widgets.Dropdown(options=STRENGTH_OPTIONS, layout=widgets.Layout(width="160px"))
 
-    with col2:
-        location = st.selectbox(
-            f"Location {i+1}",
-            LOCATION_OPTIONS,
-            key=f"location_{i}",
-        )
+            marker_widgets.append({
+                "name": name,
+                "location": loc,
+                "strength": strength
+            })
 
-    with col3:
-        strength = st.selectbox(
-            f"Strength {i+1}",
-            STRENGTH_OPTIONS,
-            key=f"strength_{i}",
-        )
+            rows.append(widgets.HBox([name, loc, strength]))
 
-    if marker_name.strip() == "":
-        marker_name = f"Marker{i+1}"
+        display(widgets.VBox(rows))
 
-    markers.append({
-        "marker": marker_name,
-        "location": location,
-        "strength": strength,
-    })
 
-df = pd.DataFrame(markers)
-names = df["marker"].tolist()
+# =========================
+# LOGIC BOXES
+# =========================
+def build_logic(_):
+    global checkpoint_pairs, morph_pairs, fixed_rows
+    checkpoint_pairs = []
+    morph_pairs = []
+    fixed_rows = []
 
-st.subheader("Logic settings")
+    df = collect_df()
+    names = df["marker"].tolist()
 
-seg_yes = st.radio("Use a segmentation marker for Opal 480?", ["No", "Yes"], horizontal=True)
-seg_marker = None
-if seg_yes == "Yes":
-    seg_marker = st.selectbox("Segmentation marker", names, key="seg_marker")
+    with logic_out:
+        clear_output()
 
-fixed_yes = st.radio("Use fixed channels?", ["No", "Yes"], horizontal=True)
-fixed_map = {}
-if fixed_yes == "Yes":
-    fixed_n = st.number_input(
-        "Number of fixed markers",
-        min_value=0,
-        max_value=min(8, len(names)),
-        value=0,
-        step=1,
-    )
-    st.write("Define fixed marker-channel pairs")
-    for i in range(fixed_n):
-        c1, c2 = st.columns(2)
-        with c1:
-            m = st.selectbox(f"Fixed marker {i+1}", names, key=f"fixed_marker_{i}")
-        with c2:
-            c = st.selectbox(f"Fixed channel {i+1}", CHANNELS, key=f"fixed_channel_{i}")
-        fixed_map[m] = c
+        display(widgets.HTML("<b>Segmentation marker (480)</b>"))
+        seg_yes = widgets.RadioButtons(options=["Yes", "No"], value="No")
+        seg_text = widgets.Text(description="Marker")
+        seg_box = widgets.Output()
 
-checkpoint_pairs_set = set()
-checkpoint_n = st.number_input("Number of checkpoint pairs", min_value=0, max_value=10, value=0, step=1)
-if checkpoint_n > 0:
-    st.write("Checkpoint pairs should be placed further apart")
-for i in range(checkpoint_n):
-    c1, c2 = st.columns(2)
-    with c1:
-        a = st.selectbox(f"Checkpoint pair {i+1} - marker A", names, key=f"checkpoint_a_{i}")
-    with c2:
-        b = st.selectbox(f"Checkpoint pair {i+1} - marker B", names, key=f"checkpoint_b_{i}")
-    if a != b:
-        checkpoint_pairs_set.add(norm_pair(a, b))
+        display(seg_yes)
+        display(seg_box)
 
-morph_pairs_set = set()
-morph_n = st.number_input("Number of morphology-different pairs", min_value=0, max_value=10, value=0, step=1)
-if morph_n > 0:
-    st.write("These pairs can tolerate being closer because morphology is distinguishable")
-for i in range(morph_n):
-    c1, c2 = st.columns(2)
-    with c1:
-        a = st.selectbox(f"Morph pair {i+1} - marker A", names, key=f"morph_a_{i}")
-    with c2:
-        b = st.selectbox(f"Morph pair {i+1} - marker B", names, key=f"morph_b_{i}")
-    if a != b:
-        morph_pairs_set.add(norm_pair(a, b))
+        def seg_update(*args):
+            with seg_box:
+                clear_output()
+                if seg_yes.value == "Yes":
+                    display(seg_text)
 
-if st.button("Suggest panel"):
-    work_df = df.copy()
+        seg_yes.observe(seg_update, names="value")
+        seg_update()
+
+        logic_state["seg_yes"] = seg_yes
+        logic_state["seg_text"] = seg_text
+
+        display(widgets.HTML("<hr><b>Fixed channels</b>"))
+        fixed_yes = widgets.RadioButtons(options=["Yes", "No"], value="No")
+        fixed_n = widgets.BoundedIntText(value=0, min=0, max=8)
+        fixed_box = widgets.Output()
+
+        display(fixed_yes)
+        display(fixed_n)
+        display(fixed_box)
+
+        def fixed_update(*args):
+            global fixed_rows
+            fixed_rows = []
+
+            with fixed_box:
+                clear_output()
+                if fixed_yes.value == "Yes":
+                    for i in range(fixed_n.value):
+                        m = widgets.Dropdown(options=names)
+                        c = widgets.Dropdown(options=CHANNELS)
+                        fixed_rows.append((m, c))
+                        display(widgets.HBox([m, c]))
+
+        fixed_yes.observe(fixed_update, names="value")
+        fixed_n.observe(fixed_update, names="value")
+        fixed_update()
+
+        logic_state["fixed_yes"] = fixed_yes
+
+        display(widgets.HTML("<hr><b>Checkpoint pairs</b>"))
+        pair_n = widgets.BoundedIntText(value=0, min=0, max=10)
+        pair_box = widgets.Output()
+
+        display(pair_n)
+        display(pair_box)
+
+        def pair_update(*args):
+            global checkpoint_pairs
+            checkpoint_pairs = []
+
+            with pair_box:
+                clear_output()
+                for i in range(pair_n.value):
+                    a = widgets.Dropdown(options=names)
+                    b = widgets.Dropdown(options=names)
+                    checkpoint_pairs.append((a, b))
+                    display(widgets.HBox([a, b]))
+
+        pair_n.observe(pair_update, names="value")
+        pair_update()
+
+        display(widgets.HTML("<hr><b>Morphology different pairs</b>"))
+        morph_n = widgets.BoundedIntText(value=0, min=0, max=10)
+        morph_box = widgets.Output()
+
+        display(morph_n)
+        display(morph_box)
+
+        def morph_update(*args):
+            global morph_pairs
+            morph_pairs = []
+
+            with morph_box:
+                clear_output()
+                for i in range(morph_n.value):
+                    a = widgets.Dropdown(options=names)
+                    b = widgets.Dropdown(options=names)
+                    morph_pairs.append((a, b))
+                    display(widgets.HBox([a, b]))
+
+        morph_n.observe(morph_update, names="value")
+        morph_update()
+
+
+# =========================
+# SUGGEST
+# =========================
+def suggest_panel(_):
+    df = collect_df()
+
+    seg = get_seg_marker()
+    fixed = get_fixed()
 
     reserved = []
     reserved_channels = []
 
-    if seg_marker is not None and seg_marker in work_df["marker"].values:
-        row = work_df[work_df["marker"] == seg_marker].copy()
+    # segmentation marker fixed to 480
+    if seg in df["marker"].values:
+        row = df[df["marker"] == seg].copy()
         row["channel"] = 480
         reserved.append(row)
         reserved_channels.append(480)
-        work_df = work_df[work_df["marker"] != seg_marker]
+        df = df[df["marker"] != seg]
 
-    for m, c in fixed_map.items():
-        if m in work_df["marker"].values:
-            row = work_df[work_df["marker"] == m].copy()
+    # fixed channels
+    for m, c in fixed.items():
+        if m in df["marker"].values:
+            row = df[df["marker"] == m].copy()
             row["channel"] = c
             reserved.append(row)
             reserved_channels.append(c)
-            work_df = work_df[work_df["marker"] != m]
+            df = df[df["marker"] != m]
 
-    if len(set(reserved_channels)) != len(reserved_channels):
-        st.error("Two reserved markers are using the same channel. Please revise segmentation/fixed settings.")
-    else:
-        n = len(work_df)
+    n = len(df)
 
-        base = [c for c in BRIGHT if c not in reserved_channels]
-        mid = [c for c in MEDIUM if c not in reserved_channels]
-        dim = [c for c in DIM if c not in reserved_channels]
-        late = [c for c in LATE if c not in reserved_channels]
+    base = [c for c in PREFERRED if c not in reserved_channels]
+    mid = [c for c in INTERMEDIATE if c not in reserved_channels]
+    late = [c for c in LATE if c not in reserved_channels]
+    pool = base + mid + late
 
-        pool = base + mid + dim + late
+    if n == 0:
+        result = pd.concat(reserved, ignore_index=True) if reserved else pd.DataFrame()
+        with result_out:
+            clear_output()
+            display(result)
+        return
 
-        if n == 0:
-            result = pd.concat(reserved, ignore_index=True) if reserved else pd.DataFrame()
-            st.success("All markers are already assigned.")
-            st.dataframe(result, use_container_width=True)
+    if len(pool) < n:
+        with result_out:
+            clear_output()
+            print("Not enough available channels for the number of unfixed markers.")
+        return
 
-        elif len(pool) < n:
-            st.error("Not enough available channels for the number of unfixed markers.")
+    best = None
+    best_tuple = None
 
-        else:
-            best = None
-            best_tuple = None
+    for combo in itertools.combinations(pool, n):
+        if not spacing_rule_ok(combo):
+            continue
 
-            for combo in itertools.combinations(pool, n):
-                if not spacing_rule_ok(combo):
+        for perm in itertools.permutations(combo, n):
+            # NEW: hard checkpoint filter
+            if not checkpoint_rule_ok(perm, df):
+                continue
+
+            risk = total_risk(df, perm)
+            spread = spread_penalty(perm)
+            late_pen = late_channel_penalty(perm, n)
+
+            score_tuple = (late_pen, risk, spread)
+
+            if best_tuple is None or score_tuple < best_tuple:
+                best_tuple = score_tuple
+                best = perm
+
+    # fallback: relax spacing rule, but keep checkpoint hard rule
+    if best is None:
+        for combo in itertools.combinations(pool, n):
+            for perm in itertools.permutations(combo, n):
+                if not checkpoint_rule_ok(perm, df):
                     continue
 
-                for perm in itertools.permutations(combo, n):
-                    risk = total_risk(work_df, perm, morph_pairs_set, checkpoint_pairs_set)
-                    spread = spread_penalty(perm)
-                    late_pen = late_channel_penalty(perm, n)
+                risk = total_risk(df, perm)
+                spread = spread_penalty(perm)
+                late_pen = late_channel_penalty(perm, n)
 
-                    # Priority order:
-                    # 1. Avoid 780 if possible
-                    # 2. Minimize overall risk (now includes brightness matching)
-                    # 3. Maximize spread
-                    score_tuple = (late_pen, risk, spread)
+                score_tuple = (late_pen, risk, spread)
 
-                    if best_tuple is None or score_tuple < best_tuple:
-                        best_tuple = score_tuple
-                        best = perm
+                if best_tuple is None or score_tuple < best_tuple:
+                    best_tuple = score_tuple
+                    best = perm
 
-            if best is None:
-                for combo in itertools.combinations(pool, n):
-                    for perm in itertools.permutations(combo, n):
-                        risk = total_risk(work_df, perm, morph_pairs_set, checkpoint_pairs_set)
-                        spread = spread_penalty(perm)
-                        late_pen = late_channel_penalty(perm, n)
+    if best is None:
+        with result_out:
+            clear_output()
+            print("No valid panel found under current constraints.")
+        return
 
-                        score_tuple = (late_pen, risk, spread)
+    df["channel"] = best
+    result = pd.concat(reserved + [df], ignore_index=True)
 
-                        if best_tuple is None or score_tuple < best_tuple:
-                            best_tuple = score_tuple
-                            best = perm
+    with result_out:
+        clear_output()
+        display(result)
 
-            result_df = work_df.copy()
-            result_df["channel"] = best
 
-            result = pd.concat(reserved + [result_df], ignore_index=True) if reserved else result_df
-            result = result[["marker", "location", "strength", "channel"]]
+generate_button.on_click(build_form)
+logic_button.on_click(build_logic)
+suggest_button.on_click(suggest_panel)
 
-            st.success("Suggested panel generated.")
-            st.dataframe(result, use_container_width=True)
-
-            if best_tuple is not None:
-                st.caption(
-                    f"Scoring summary — late channel penalty: {best_tuple[0]}, "
-                    f"risk score: {best_tuple[1]}, spread penalty: {best_tuple[2]}"
-                )
+display(
+    widgets.VBox([
+        title,
+        marker_count,
+        generate_button,
+        form_out,
+        logic_button,
+        logic_out,
+        suggest_button,
+        result_out
+    ])
+)
